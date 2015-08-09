@@ -221,9 +221,9 @@ accuracy(rfPredict,testSet$classe)
 
 ```
 
-Across the board, the simple split validation indicates even greater accuracy than the k-fold repeated technique, which is interesting given that the test set is relatively independent.  In any case with more than 98% accuracy for RF in either case, we would expect few if any classification errors when predicting the 20 classe values of the pmltest data set.
+For all three algorithms, simple split validation indicates similar accuracy to the maximum accuracy bound of the k-fold repeated technique, so the split technique appeared to be providing a slight over-estimate of accuracy compared to the k-fold repeated method.  In any case with more than 98% accuracy for RF in either case, we would expect few if any classification errors when predicting the 20 classe values of the pmltest data set.
 
-Finally we attempt to predict the weight training performance class using the trained models
+Finally we attempt to predict the weight training performance class of the pmltest data set using each of the trained models.
 
 ``` {r compare_predictiions, echo=TRUE}
 PredictTest<- data.frame(predict(model_list, newdata=pmltest))
