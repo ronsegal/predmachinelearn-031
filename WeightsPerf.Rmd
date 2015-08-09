@@ -1,0 +1,257 @@
+---
+output:
+  knitrBootstrap::bootstrap_document:
+    title: "Learning Weight Training Performance"
+    theme: readable
+    highlight: sunburst
+    theme.chooser: TRUE
+    highlight.chooser: TRUE
+  author: "Ron Segal"
+  date: "04/08/2015"
+  output: html_document
+---
+## Learning Weight Training Performance
+## Author: Ron Segal
+## 9th August 2015
+
+# Synopsis
+
+This report is for the project assignment of the Coursera, Practical Machine Learning course.  The main objective was to use a set of data taken from movement sensors (Jawbone Up, Nike FuelBand, Fitbit) attached to the bodies of a group of six subjects, to predict how well they performed (using five performance categories) on a weight training exercise (curling dumbbells).  So we decided to try three different machine learning algorithms (Support Vector Machine, Gradient Boosting Model, and Random Forest) which were trained on a subset of the data with known performance. Subsequently the algorithm with the maximum predictive accuracy was used to predict performance on a small set of test data (twenty records) with unknown performance (part of the assignment scoring was on accuracy of predictions).  In this case the Random Forest algorithm proved to be most accurate (over 98%) closely followed by Gradient Boosting Machine, then Support Vector Machine (Linear Kernel) which was substantially less accurate. Performance category predictions on the test set using the Random Forest algorithm turned out to be 100% correct.
+
+Note that the data for this project was kindly provided by the authors of this paper:
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. http://groupware.les.inf.puc-rio.br/har#ixzz3iCBIeR18
+
+# Data Processing
+
+### Data Source
+
+The training dataset used for this project was downloaded from https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv, comprising just under 19,622 records of 160 variables, from up to 4 accelerometers attached to the subjects' bodies (Upper Arm, Waist, Thigh, Ankle). For each record a'classe' variable indicates the category of performance A,B,C,D, or E, as judged by a weight training expert. A separate set of test data comprising 20 records, which does not include the classe variable, was downloaded from https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+### Data pre-processing
+
+When the training data table was examined a number of variables were found to have several meta data variables such as dates that we decided to drop as unlikely to contribute to the variance (at least not in a straightforward manner). Also there were many missing rows, so we decided to drop all variables with more than 10% records missing. 
+This left 53 variables including the independent variable 'classe'.
+
+We also started to look for potential outliers that might result in a less accurate predictions. However in the end decided not to pursue this due to potentially significant effort that would have been needed to be confident enough to drop records.
+
+To reduce the number of dimensions due to any significant correlations between variables we used Principle Component Analysis embedded in the Caret training function (see further below). 
+
+### Analysis Approach
+
+Although not strictly required by the assignment we decided to try three different kinds of machine learning algorithms, Support Vector Machine (SVM) just with a linear kernel, Gradient Boosting Model or Machine (GBM), and Random Forest (RF), then pick the algorithm with the most accurate predictive performance on the training set to predict the weight training categories of the test set.
+
+To test the accuracy we decided to compare a simple split analysis, with the training set divided into 70% training and 30% test against a K-fold Repeated method.
+
+
+# Results
+
+**Load required packages**
+
+```{r load_packages, echo=TRUE, message=FALSE}
+library(caret)
+library(caretEnsemble)
+library(mlbench)
+library(plyr)
+library(dplyr)
+library(reshape2)
+library(doMC)
+library(devtools)
+library(gbm)
+library(survival)
+
+```
+
+*Note - Created and run on Ubuntu Linux 14.04, using R Studio Version 0.98.1091*
+
+```{r set_directory, echo=TRUE}
+# configure multicore
+registerDoMC(cores=2)
+# Set working directory
+setwd("~/Coursera/predmachlearn-031/")
+```
+
+### Load and preprocess the data
+
+```{r load_data, echo=TRUE, cache=TRUE}
+
+## Download data if it doesn't exist and in any case read into data frames
+# Note that cache is ON
+  if (!file.exists("pml-training.csv"))
+  {
+      dataUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+      download.file(dataUrl, destfile="pml-training.csv", method="wget")
+  }
+  pmltrain <- read.csv("pml-training.csv", sep=",")
+
+  if (!file.exists("pml-testing.csv"))
+  {
+      dataUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+      download.file(dataUrl, destfile="pml-testing.csv", method="wget")
+  }
+  pmltest <- read.csv("pml-testing.csv", sep=",")
+
+```
+
+Dimensions of the training set are: `r dim(pmltrain)`.
+Dimensions of the final testing set are: `r dim(pmltest)`.
+
+```{r pre_process, echo=TRUE, cache=TRUE}
+# Split training data into 70% training and 30% validation test sets respectively 
+set.seed(999)
+inTrain<-createDataPartition(pmltrain$classe,p=0.7,list=FALSE)
+trainSet<-pmltrain[inTrain,]
+testSet<- pmltrain[-inTrain,]
+
+# Convert blank values to NA
+trainSet[trainSet==""] <- NA
+testSet[testSet==""] <- NA
+
+# Drop columns where number of NAs > 10%
+trainSet <- trainSet[ lapply( trainSet, function(x) sum(is.na(x)) / length(x) ) < 0.1 ]
+testSet <- testSet[ lapply( testSet, function(x) sum(is.na(x)) / length(x) ) < 0.1 ]
+
+# Identify number of remaining columns containing NAs
+length(colnames(trainSet)[unlist(lapply(trainSet, function(x) any(is.na(x))))])
+length(colnames(testSet)[unlist(lapply(testSet, function(x) any(is.na(x))))])
+
+```
+Since there were no remaining NA values, there was no need to consider value interpolation or similar.
+After inspecting the training dataset we decided to drop meta data type columns that did not appear to contribute to the variance in performance. This included new_window and num_window columns, which are effectively session related variables.
+
+```{r drop_columns, echo=TRUE, , message=FALSE}
+trainSet<-subset(trainSet, select=-c(X,user_name,raw_timestamp_part_1, raw_timestamp_part_2,cvtd_timestamp,new_window,num_window))
+testSet<-subset(testSet, select=-c(X,user_name,raw_timestamp_part_1, raw_timestamp_part_2,cvtd_timestamp,new_window,num_window))
+
+# Summarise types of factors remaining
+data.frame(sapply(trainSet,class)) %>%
+  group_by(sapply.trainSet..class.) %>%
+    summarise(no_rows=length(sapply.trainSet..class.))
+
+```
+This left `r dim(trainSet)[2]` of numeric (or integer) features, plus the dependent, classe factor variable.
+
+Given the relatively large number of features we decided not to attempt to visually examine them as a whole using a featurePlot or similar (a principal component analysis reduction of dimensions could have been attempted to render the data more visually amenable).
+
+```{r outliers_check, echo=TRUE, , message=FALSE}
+# Outliers check
+library(mvoutlier)
+trainOutl <- pcout(subset(trainSet, select=-c(classe)), makeplot=FALSE, explarvar=0.95) 
+sum(trainOutl$wfinal01==0)/length(trainOutl$wfinal01)
+
+```
+
+From a quick investigation of potential outliers using pcout from the mvoutlier package, around 30% of observations were weighted as 0, indicating these as potential multivariate outliers. Possibly interesting to track down the cause we decided to leave this for in-depth future analysis!
+
+```{r performance_plot, out.width='350px', out.height='350px', echo=TRUE}
+
+barplot(prop.table(table(pmltrain$classe)))
+
+```
+
+A bar plot was used to visually inspect the relative frequency of the different factor levels of the independent variable classe. A relatively even distribution was indicated, providing sufficient learning examples at each level to potentially enable an accurate algorithm to be derived.  It also means that the Kappa statistic is likely to be representative, which it often isn't with highly skewed classes.
+
+### ML Algorithm selection and training
+ 
+We decided to test three different learning algorithms, a Generalised Boosted Model (gbm), Support Vector Machine (Linear kernel) and Random Forest, then select the one that delivered the most accurate cross validation results.
+
+Instead of running a separate pre-processing filter to identify highly correlated features
+we reduced the number dimensions using Principal Component Analysis via the preProcess argument of the Caret train function, with default threshold to keep components that explain 95% of the variance. Consequently pre-processing was applied to each re-sampling iteration, i.e. each re-sample was effectively a different training set to which PCA is applied. Automatic algorithm tuning was used, with tuneLength indicating the number of different values to try for each algorithm parameter.
+
+```{r model_training, echo=TRUE, message=FALSE}
+
+preproc <- c("pca") #NB - for pca, centered and scaled by default
+
+# cross-validation to calculate out-of-sample error for each different training algorithm is based on the repeated k-fold method defined as follows:
+
+trainCntrl <- trainControl(method="repeatedcv", number=5, repeats=3)
+
+# The different algorithms were trained using caretlist which ensure the same re-sampling parameters are applied to each model.
+
+## NB -The output of the commented out training function below was saved
+## to a file 'modelist.Rda
+## The variable model_list is loaded from this file to generate this knitr output
+## otherwise it was taking more than 1hr to generate!
+
+# model_list <- caretList(
+#   classe~., data=trainSet,
+#   trControl=trainCntrl,
+#   methodList=c('gbm', 'svmLinear','rf'),
+#   tuneLength=3,
+#   verbose=FALSE
+#   ) 
+# save(model_list,'modelist.Rda')
+
+load('modelist.Rda') # Pre-saved model for testing knitr
+
+```
+Note that it took over hour to run the k-fold repeated models on a low specification PC, Pentium 3GHz dual-core with 6GB memory!
+
+### Model Selection and Performance
+
+```{r summarise_results, echo=TRUE}
+
+# collect resamples
+results <- resamples(list(RF=model_list[['rf']] , GBM=model_list[['gbm']], SVM=model_list[['svmLinear']]))
+
+# summarize the distributions
+summary(results)
+# boxplots of results
+bwplot(results)
+
+```
+**Out of Sample Error**
+
+From the plot the Random Forest algorithm looks to be significantly more accurate than the other two methods (although we didn't test the statistical significance of the difference). Median accuracy indicated from the k-fold repeated cross-validation is 0.99, i.e. **0.01 out of sample error** (1 - accuracy). So the expectation is that the Random Forest algorithm would get on average 1 out of 100 predictions wrong. A Kappa statistic > 0.75, which it is for RF and GBM is indicative of excellent correspondence between predicted and actual classifications. 
+
+We decided to compare the results of k-fold repeated cross validation against a simple split validation using the 30% test set
+
+``` {r split_accuracy, echo=TRUE, message=FALSE}
+accuracy<-function(pred,obs)
+{
+  cmat<-confusionMatrix(pred,obs)
+  accuracy<-cmat$overall[1]
+  return(accuracy)
+}
+gbmPredict<-predict(model_list[['gbm']],newdata=testSet)
+accuracy(gbmPredict,testSet$classe)
+svmPredict<-predict(model_list[['svmLinear']],newdata=testSet)
+accuracy(svmPredict,testSet$classe)
+rfPredict<-predict(model_list[['rf']],newdata=testSet)
+accuracy(rfPredict,testSet$classe)
+
+```
+
+Across the board, the simple split validation indicates even greater accuracy than the k-fold repeated technique, which is interesting given that the test set is relatively independent.  In any case with more than 98% accuracy for RF in either case, we would expect few if any classification errors when predicting the 20 classe values of the pmltest data set.
+
+Finally we attempt to predict the weight training performance class using the trained models
+
+``` {r compare_predictiions, echo=TRUE}
+PredictTest<- data.frame(predict(model_list, newdata=pmltest))
+
+# Output Random Forest test predictions to separate files
+
+# setwd("~/Coursera/predmachlearn-031/predictions")
+# pml_write_files = function(x){
+#   n = length(x)
+#   for(i in 1:n){
+#     filename = paste0("problem_id_",i,".txt")
+#     write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+#   }
+# }
+# 
+# pml_write_files(PredictTest$rf)
+
+print(PredictTest)
+
+```
+
+# Conclusion
+
+Intuitively we weren't really surprised that a decision tree algorithm performed as well as it did, as if one attempts typical types of incorrect exercise when curling weights it is clear that these are characterised by relatively gross movements of specific parts of the body.  Greater predictive accuracy we suspect could have been achieved by including the 'time window' variable information (which was dropped). Intuitively this should account for the time sequencing of movement of different parts of the body, e.g. perhaps arms after hips, likely to be differentially attributable to different types of erroneous exercise. Further improvements could almost certainly have been achieved by manually tuning the algorithms (trying different SVM kernels would have been instructive). 
+Finally, we have to admit to being quite excited about the potential applications of this kind of body movement prediction.  For example, it seems possible (likely even) that the software of our automatic lap counting swimming watch, which uses an accelerometer, was developed using a machine learning approach.
+
+
+
+    
+
+ 
